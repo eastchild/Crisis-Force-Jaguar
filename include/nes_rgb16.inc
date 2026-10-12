@@ -1,0 +1,9 @@
+;; Généré depuis nes_probe.NES_RGB : palette 2C02 -> RGB16 Jaguar (RRRRR BBBBB GGGGGG)
+    dc.w    $5295,$0387,$0C84,$3440,$4300,$5980,$5001,$3806
+    dc.w    $200A,$080E,$0010,$000F,$01CC,$0000,$0000,$0000
+    dc.w    $9CE5,$0E13,$374C,$5F07,$8D85,$A305,$9908,$780F
+    dc.w    $5016,$281C,$081F,$015D,$03D9,$0000,$0000,$0000
+    dc.w    $EF7B,$4F66,$7F5F,$B758,$E755,$ED96,$EB1A,$D122
+    dc.w    $A02A,$7031,$4934,$3B73,$3E6D,$39CF,$0000,$0000
+    dc.w    $EF7B,$AF73,$BF6F,$D76C,$EF6B,$EEAB,$EDAD,$E4B1
+    dc.w    $CBF4,$B3F7,$ACB8,$9DB8,$A735,$A528,$0000,$0000

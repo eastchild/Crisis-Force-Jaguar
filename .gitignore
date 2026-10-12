@@ -1,0 +1,49 @@
+# Never commit ROM or cartridge images (the game belongs to Konami)
+*.nes
+*.fds
+*.j64
+*.jag
+*.rom
+*.abs
+*.cof
+
+# Generated from the ROM by tools/recomp6502.py (game code and data): rebuilt by build.py
+source/nes_code.s
+include/nes/
+
+# Build products (build.py)
+output/
+dist/
+*.o
+*.bin
+*.lst
+*.sym
+
+# Captures of the running game (music, pictures, videos)
+*.wav
+*.avi
+*.png
+assets/sound_preview/
+
+# Logs and test runs
+*.log
+*.err
+*.state
+*.pkl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+
+# Editors and system files
+.vscode/
+.idea/
+.claude/
+*.swp
+*.bak
+*.tmp
+.DS_Store
+Thumbs.db
