@@ -130,7 +130,18 @@ hle_sprites:
 .lnext:
     addq.b  #1,d7
     cmpi.b  #$3A,d7
-    bcs.s   .lscan
+    bcc.s   .lsend
+    moveq   #3,d3
+    and.b   d7,d3
+    bne.s   .lscan                     ; case non alignée : une par une
+.lscan4:
+    tst.l   (a4,d7.w)                  ; 4 cases vides d'un coup (au-delà de $39 :
+    bne.s   .lscan                     ;  autres données, retour case par case)
+    addq.b  #4,d7
+    cmpi.b  #$3A,d7
+    bcs.s   .lscan4
+.lsend:
+    moveq   #$3A,d7
     move.b  d7,ZP+$0A(a5)
     bra     .lafter
 .lfound:
@@ -160,7 +171,7 @@ hle_sprites:
     tst.b   ZP+$08(a5)
     beq     .lret_a0                   ; plus de place : RTS
     cmpi.b  #$3A,d7
-    bcs.s   .lscan
+    bcs     .lscan
     bra     .lafter
 
     ;; Fin de la liste d'objets

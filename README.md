@@ -79,7 +79,12 @@ python build.py --autotest --stage N   # test build: automatic play from stage N
 `output/CrisisForce.j64` is a 4 MB cartridge image (BigPEmu, MAME, flash cartridges,
 SkunkBoard); `output/CrisisForce.abs` runs in Virtual Jaguar. The test tools in `tools/`
 (`recomp_test.py`, `jag_sim.py`, `gpu_regress.py`, `risc_cycles.py`, `dsp_test.py`) also need
-`unicorn`, `Pillow` and `capstone`. The development log is in `docs/` (in French).
+`unicorn`, `Pillow` and `capstone`. `tools/jagmcp_run.py` measures the real speed (game
+frames, drawn frames, dropped frames, 68000 and GPU profiles) in
+JagMCP, a cycle-faithful emulator built from the MiSTer core (set
+`JAGMCP` and `JAG_BIOS`). `tools/mame_stages.py` is a quick headless regression in MAME
+(every stage: runtime errors, counters, non-blank screenshots; set `MAME` and `MAME_ROMS`).
+The development log is in `docs/` (in French).
 
 ### Legal
 
@@ -172,8 +177,12 @@ python build.py --autotest --stage N   # version de test : partie automatique à
 `output/CrisisForce.j64` est une image de cartouche de 4 Mo (BigPEmu, MAME, cartouches flash,
 SkunkBoard) ; `output/CrisisForce.abs` se lance dans Virtual Jaguar. Les outils de test de
 `tools/` (`recomp_test.py`, `jag_sim.py`, `gpu_regress.py`, `risc_cycles.py`, `dsp_test.py`)
-demandent en plus `unicorn`, `Pillow` et `capstone`. Le journal de développement est dans
-`docs/`.
+demandent en plus `unicorn`, `Pillow` et `capstone`. `tools/jagmcp_run.py` mesure la vitesse
+réelle (images de jeu, images affichées, images sautées, profils du 68000 et du GPU) dans
+JagMCP, un émulateur fidèle au cycle près tiré du cœur MiSTer (variables `JAGMCP` et
+`JAG_BIOS`). `tools/mame_stages.py` est une non-régression rapide sous MAME, sans fenêtre
+(chaque niveau : erreurs du runtime, compteurs, captures non unies ; variables `MAME` et
+`MAME_ROMS`). Le journal de développement est dans `docs/`.
 
 ### Mentions légales
 

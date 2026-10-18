@@ -10,10 +10,11 @@
 ;;      la clé (adresse des données CHR | palette << 30) est comparée au
 ;;      cache bg_cache ; seules les tuiles changées sont redessinées dans
 ;;      bg_plane (8 bpp, pixel = palette*4 + couleur, 0 = transparent) ;
-;;   2. efface au blitter les deux calques de sprites du rendu (devant /
+;;      (tuiles déjà converties : copie au blitter, en parallèle du GPU) ;
+;;   2. efface les sprites du rendu précédent dans les deux calques (devant /
 ;;      derrière le décor) et y dessine les 64 sprites de l'OAM, de 63 à 0
 ;;      (le sprite 0 finit au-dessus) : pixel = 16 + palette*4 + couleur ;
-;;   3. remet gpu_busy à 0.
+;;   3. attend la fin de la dernière copie au blitter, remet gpu_busy à 0.
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 gpu_start:
@@ -52,6 +53,13 @@ gpu_spr_ret:
     movei   #gpu_dbg,r1
     moveq   #4,r0
     store   r0,(r1)
+    ;; dernière copie de tuile au blitter finie avant de rendre la main
+    movei   #B_CMD,r1
+gpu_end_bwait:
+    load    (r1),r0
+    btst    #0,r0
+    jr      eq,gpu_end_bwait
+    nop
     .if ^^defined PERFHUD
     movei   #VC,r1                     ; fin du rendu (demi-ligne) pour le HUD
     loadw   (r1),r0
@@ -72,6 +80,19 @@ gpu_spr_ret:
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 gpu_bg:
+    ;; blitter (au repos : attendu en fin de rendu) : registres constants des
+    ;; copies de tuiles (gpu_bg_blit) ; pas (-8, +1) : le mode phrase laisse X
+    ;; sur la phrase suivante à la fin de chaque ligne
+    movei   #A1_BASE,r15
+    movei   #(PITCH1|PIXEL8|WID256|XADDPHR),r0
+    store   r0,(r15+1)                 ; A1_FLAGS
+    movei   #(PITCH1|PIXEL8|WID8|XADDPHR),r0
+    store   r0,(r15+10)                ; A2_FLAGS
+    movei   #$0001FFF8,r0
+    store   r0,(r15+4)                 ; A1_STEP
+    store   r0,(r15+13)                ; A2_STEP
+    moveq   #0,r0
+    store   r0,(r15+2)                 ; A1_CLIP (bogue : 0 sans découpage)
     movei   #$3C,r9
     movei   #256,r10                   ; ligne du plan
     moveq   #4,r12                     ; rangée suivante du cache de tuiles - 4
@@ -616,8 +637,15 @@ gpu_bg_tile:
     add     r0,r19
     load    (r19),r0
     cmp     r18,r0
-    movei   #gpu_bg_copy,r0
-    jump    eq,(r0)
+    movei   #gpu_bg_blit,r0
+    jump    eq,(r0)                    ; déjà convertie : copie au blitter
+    nop
+    ;; conversion : le blitter peut encore lire cette entrée du cache
+    movei   #B_CMD,r15
+gpu_bg_cwait:
+    load    (r15),r0
+    btst    #0,r0                      ; bit 0 : blitter au repos
+    jr      eq,gpu_bg_cwait
     nop
     store   r18,(r19)
     move    r11,r21                    ; conversion dans le cache
@@ -685,6 +713,33 @@ gpu_bg_copy:
     addq    #8,r14
     storep  r23,(r15)                  ; G_HIDATA -> long haut
     add     r10,r15
+    movei   #gpu_bg_next,r0
+    jump    t,(r0)
+    nop
+;; Tuile déjà convertie (r11) -> plan, au blitter (skill : copies au blitter ;
+;; le GPU calcule la tuile suivante pendant la copie). Registres constants
+;; posés par gpu_bg : A1 = plan (8 bpp, largeur 256), A2 = tuile (largeur 8),
+;; mode phrase, pas (-8, +1) ; ici les pointeurs et B_COUNT (8 x 8 pixels).
+gpu_bg_blit:
+    movei   #A1_BASE,r15
+    move    r3,r14
+    shlq    #3,r14
+    add     r6,r14                     ; destination : plan + colonne * 8
+    moveq   #0,r0
+    movei   #$00080008,r16             ; B_COUNT : 8 lignes de 8 pixels
+    movei   #(SRCEN|UPDA1|UPDA2|LFU_REPLACE),r17
+gpu_bg_bwait:
+    load    (r15+14),r19               ; B_CMD : bit 0 = au repos
+    btst    #0,r19
+    jr      eq,gpu_bg_bwait
+    nop
+    store   r14,(r15)                  ; A1_BASE
+    store   r0,(r15+3)                 ; A1_PIXEL
+    store   r0,(r15+6)                 ; A1_FPIXEL
+    store   r11,(r15+9)                ; A2_BASE
+    store   r0,(r15+12)                ; A2_PIXEL
+    store   r16,(r15+15)               ; B_COUNT
+    store   r17,(r15+14)               ; B_CMD (en dernier : départ)
 gpu_bg_next:
     addq    #1,r3
     addq    #4,r5
@@ -904,14 +959,20 @@ gpu_spr_8x8:
 gpu_spr_tab:
     shlq    #4,r3
     add     r15,r3                     ; r3 = adresse CHR de la première tuile
-    ;; Couleur de base : 16 + palette*4
+    ;; Couleur de base : 16 + palette*4 ; tables de conversion de cette palette
+    ;; (gpu_bgt + palette*128 : plan 0, plan 1 = +64) pour les rangées entières
     moveq   #3,r16
     and     r11,r16
+    move    r16,r26
+    shlq    #7,r26
+    movei   #gpu_bgt,r0
+    add     r0,r26
     shlq    #2,r16
     addq    #16,r16
     ;; Ligne écran de départ : y + 1
     addq    #1,r2
     moveq   #0,r6                      ; rangée r dans le sprite
+    movei   #gs_bandtab,r31            ; bande courante (les lignes du sprite croissent)
 gpu_spr_row:
     ;; Ligne écran y+1+r : < 0 (morceau au bord haut) -> rangée suivante ; < 240
     move    r2,r17
@@ -933,8 +994,9 @@ gpu_spr_row:
     subq    #1,r18
     sub     r6,r18
 gpu_spr_nov:
-    ;; r8 = pointeurs CHR de la bande qui contient la ligne r17
-    movei   #gs_bandtab,r19
+    ;; r8 = pointeurs CHR de la bande qui contient la ligne r17 (recherche
+    ;; reprise à la bande de la rangée précédente)
+    move    r31,r19
 gsb_find:
     load    (r19),r0
     cmp     r0,r17
@@ -943,6 +1005,7 @@ gsb_find:
     jr      t,gsb_find
     addq    #8,r19                     ; (délai)
 gsb_found:
+    move    r19,r31
     addq    #4,r19
     load    (r19),r8
     ;; adresse = base + (rangée>>3)*16 + (rangée&7)
@@ -990,6 +1053,124 @@ gpu_spr_nohf:
     shlq    #8,r23
     add     r14,r23
     add     r1,r23
+    ;; Rangée entière (sprite devant le décor, x dans 0..248) : 8 pixels par
+    ;; les tables en RAM GPU, fusionnés au calque en 2 ou 3 longs (au lieu de
+    ;; 8 storeb) ; sinon pixel par pixel (gpu_spr_slow)
+    cmpq    #0,r29
+    movei   #gpu_spr_slow,r15
+    jump    ne,(r15)                   ; sprite derrière : masque du calque devant
+    nop
+    movei   #248,r0
+    cmp     r0,r1                      ; x - 248 (x < 0 : très grand en non signé)
+    jump    hi,(r15)
+    nop
+    move    r21,r24
+    shrq    #4,r24
+    shlq    #2,r24                     ; quartet haut du plan 0 (x4)
+    move    r22,r25
+    shrq    #4,r25
+    shlq    #2,r25                     ; quartet haut du plan 1
+    move    r21,r18
+    and     r10,r18
+    shlq    #2,r18                     ; quartet bas du plan 0
+    move    r22,r19
+    and     r10,r19
+    shlq    #2,r19                     ; quartet bas du plan 1
+    movei   #gpu_smask,r15
+    move    r24,r0
+    or      r25,r0
+    add     r15,r0
+    load    (r0),r27                   ; masque des pixels 0-3 ($FF si non nul)
+    move    r18,r0
+    or      r19,r0
+    add     r15,r0
+    load    (r0),r30                   ; masque des pixels 4-7
+    move    r26,r20
+    addq    #32,r20
+    addq    #32,r20                    ; tables du plan 1
+    add     r26,r24
+    add     r20,r25
+    add     r26,r18
+    add     r20,r19
+    load    (r24),r24
+    load    (r25),r25
+    load    (r18),r18
+    load    (r19),r19
+    or      r25,r24                    ; pixels 0-3 : couleur | palette << 2
+    or      r19,r18                    ; pixels 4-7
+    movei   #$10101010,r0
+    move    r27,r15
+    and     r0,r15
+    or      r15,r24                    ; + 16 (palettes des sprites) si non nul
+    move    r30,r15
+    and     r0,r15
+    or      r15,r18
+    moveq   #3,r0
+    and     r23,r0                     ; x & 3
+    movei   #gpu_spr_mis,r15
+    jump    ne,(r15)
+    nop
+    load    (r23),r19                  ; aligné : 2 longs
+    move    r27,r15
+    not     r15
+    and     r15,r19
+    or      r24,r19
+    store   r19,(r23)
+    addq    #4,r23
+    load    (r23),r19
+    move    r30,r15
+    not     r15
+    and     r15,r19
+    or      r18,r19
+    store   r19,(r23)
+    movei   #gpu_spr_rownext,r0
+    jump    t,(r0)
+    nop
+gpu_spr_mis:
+    ;; non aligné : 3 longs, décalés de b = (x & 3) * 8 bits
+    sub     r0,r23                     ; adresse alignée
+    shlq    #3,r0                      ; b
+    move    r0,r25
+    subq    #32,r25                    ; b - 32 : décalage à gauche de 32 - b
+    move    r24,r19
+    sh      r0,r19                     ; pixels : haut >> b
+    move    r27,r15
+    sh      r0,r15                     ; masque
+    load    (r23),r21
+    not     r15
+    and     r15,r21
+    or      r19,r21
+    store   r21,(r23)
+    addq    #4,r23
+    move    r24,r19
+    sh      r25,r19
+    move    r18,r21
+    sh      r0,r21
+    or      r21,r19                    ; (haut << (32 - b)) | (bas >> b)
+    move    r27,r15
+    sh      r25,r15
+    move    r30,r21
+    sh      r0,r21
+    or      r21,r15
+    load    (r23),r21
+    not     r15
+    and     r15,r21
+    or      r19,r21
+    store   r21,(r23)
+    addq    #4,r23
+    move    r18,r19
+    sh      r25,r19                    ; bas << (32 - b)
+    move    r30,r15
+    sh      r25,r15
+    load    (r23),r21
+    not     r15
+    and     r15,r21
+    or      r19,r21
+    store   r21,(r23)
+    movei   #gpu_spr_rownext,r0
+    jump    t,(r0)
+    nop
+gpu_spr_slow:
     move    r1,r24                     ; x courant
     moveq   #8,r25
     movei   #256,r27
@@ -1046,7 +1227,81 @@ gpu_spr_next:
     addq    #4,r0
     load    (r0),r2
     store   r1,(r2)
+    ;; Lignes occupées par chaque calque : la liste d'objets n'affiche que
+    ;; celles-là (l'OP, prioritaire sur le 68000, ne lit plus des lignes vides)
+    movei   #gpu_spr_ext,r25
+    movei   #gs_logf,r0
+    movei   #gs_extf,r1
+    move    pc,r26
+    jump    t,(r25)
+    addqt   #6,r26
+    movei   #gs_logb,r0
+    movei   #gs_extb,r1
+    move    pc,r26
+    jump    t,(r25)
+    addqt   #6,r26
     jump    t,(r28)
+    nop
+
+;; Étendue verticale d'un calque d'après sa liste de rectangles : r0 = gs_logf /
+;; gs_logb, r1 = résultat (première ligne << 16 | ligne de fin, 0 si vide) ;
+;; retour par r26
+gpu_spr_ext:
+    load    (r0),r2                    ; fin de la liste (prochaine entrée)
+    addq    #4,r0
+    load    (r0),r3                    ; &spr_end[calque]
+    movei   #spr_end,r4
+    sub     r4,r3
+    shlq    #6,r3                      ; calque * 256
+    movei   #spr_lists,r4
+    add     r4,r3                      ; début de la liste
+    movei   #240,r5                    ; première ligne
+    moveq   #0,r6                      ; ligne de fin
+    movei   #$FF,r10
+    movei   #gse_loop,r11
+    movei   #gse_done,r12
+gse_loop:
+    cmp     r2,r3
+    jump    eq,(r12)
+    nop
+    load    (r3),r7                    ; bit 31 = 8x16, bits 16-23 = ligne
+    addqt   #4,r3
+    move    r7,r8
+    shrq    #16,r8
+    and     r10,r8                     ; ligne
+    moveq   #8,r9
+    btst    #31,r7
+    jr      eq,gse_h8
+    nop
+    moveq   #16,r9
+gse_h8:
+    cmp     r5,r8                      ; ligne - première
+    jr      pl,gse_m1
+    add     r8,r9                      ; (délai) ligne de fin du sprite
+    move    r8,r5
+gse_m1:
+    cmp     r9,r6                      ; fin - fin du sprite
+    jump    pl,(r11)
+    nop
+    jump    t,(r11)
+    move    r9,r6                      ; (délai)
+gse_done:
+    moveq   #0,r7
+    cmp     r6,r5                      ; première - fin : >= 0 -> vide
+    jr      pl,gse_st
+    nop
+    movei   #240,r8
+    cmp     r8,r6
+    jr      mi,gse_ok
+    nop
+    move    r8,r6
+gse_ok:
+    move    r5,r7
+    shlq    #16,r7
+    or      r6,r7
+gse_st:
+    store   r7,(r1)
+    jump    t,(r26)
     nop
 
 ;; Effacement des rectangles notés lors du dernier dessin dans le calque r1 ;
@@ -1180,6 +1435,8 @@ gs_logf:    dc.l    0                  ; prochaine entrée de la liste du calque
 gs_endf:    dc.l    0                  ; emplacement de fin de cette liste (spr_end)
 gs_logb:    dc.l    0
 gs_endb:    dc.l    0
+gs_extf:    dc.l    0                  ; lignes occupées du calque devant (lu par le 68000)
+gs_extb:    dc.l    0                  ; et du calque derrière : début << 16 | fin, 0 = vide
 spr_end:    dc.l    spr_lists,spr_lists+256,spr_lists+512,spr_lists+768
 ;; Rendu du décor : par palette p (128 octets), quartet b3..b0 d'un plan
 ;; -> 4 pixels (b3 = pixel de gauche = octet fort) : plan 0 = 1 | p*4,
@@ -1201,6 +1458,10 @@ gpu_bgt:
     dc.l    $0D000000,$0D00000D,$0D000D00,$0D000D0D,$0D0D0000,$0D0D000D,$0D0D0D00,$0D0D0D0D
     dc.l    $00000000,$0000000E,$00000E00,$00000E0E,$000E0000,$000E000E,$000E0E00,$000E0E0E
     dc.l    $0E000000,$0E00000E,$0E000E00,$0E000E0E,$0E0E0000,$0E0E000E,$0E0E0E00,$0E0E0E0E
+;; Quartet (OU des deux plans) -> masque de 4 pixels ($FF si non nul)
+gpu_smask:
+    dc.l    $00000000,$000000FF,$0000FF00,$0000FFFF,$00FF0000,$00FF00FF,$00FFFF00,$00FFFFFF
+    dc.l    $FF000000,$FF0000FF,$FF00FF00,$FF00FFFF,$FFFF0000,$FFFF00FF,$FFFFFF00,$FFFFFFFF
 ;; Quartet aux bits inversés
 gpu_revnib:
     dc.l    $0,$8,$4,$C,$2,$A,$6,$E,$1,$9,$5,$D,$3,$B,$7,$F

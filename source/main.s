@@ -18,7 +18,7 @@
     .include "JAGUAR.INC"
     .include "nes_jag.inc"
 
-PERF_W          equ 128                  ; largeur du HUD perfhud (pixels)
+PERF_W          equ 192                  ; largeur du HUD perfhud (pixels, 24 caractères)
 BOOT_STOP       equ $3FF8                ; objet STOP du démarrage (boot.s, Start)
 RT_JAGUAR       equ 1                  ; nes_runtime.s : jag_irq_changed (PIT), jag_halt (erreur)
 
@@ -306,6 +306,9 @@ jag_int:
     addi.w  #255,d0
     move.w  d0,PIT1
 .nopit:
+    ;; INT2 dès l'acquittement : le 68000 rend la priorité du bus au GPU et au
+    ;; blitter (la garder pendant le NMI, qui dure presque une image au niveau 2,
+    ;; affamait le GPU : mesuré dans JagMCP, 2 images sur 3 sautées)
     move.w  #0,INT2
     ;; Contexte du code 6502 interrompu (a2 = pile 6502...) pour rt_nmi/rt_irq
     movem.l 2(sp),d0-d7/a0-a6
@@ -318,14 +321,19 @@ jag_int:
     btst    #7,rt_ppuctrl(a6)
     beq.s   .nonmi
     move.w  #$2000,sr
+    ;; liste d'objets de l'image que le GPU rend, avant le NMI : elle ne dépend
+    ;; que de l'instantané pris à cette VBL ; construite après le NMI, elle
+    ;; manquait une fois sur deux à la VBL suivante quand le NMI dure presque une
+    ;; image (JagMCP, niveau 2), sans faire perdre d'images de jeu ici
+    bsr     PrebuildOL
     move.b  jag_in_irq,-(sp)           ; NMI pendant une IRQ : écritures « NMI »
     sf      jag_in_irq
     bsr     rt_nmi
     move.b  (sp)+,jag_in_irq
+    addq.l  #1,stat_nmi
     .if ^^defined PERFHUD
     addq.w  #1,perf_nmi                ; image de jeu terminée
     .endif
-    bsr     PrebuildOL                 ; liste de la prochaine image, hors VBL
 .nonmi:
     btst    #3,d7
     beq.s   .noirq
@@ -380,13 +388,13 @@ jag_vbl:
     sf      vbl_swapped
     sf      vbl_take
     move.l  gpu_busy,d1                ; RAM GPU : move.l seulement
-    bne.s   .ldrop
+    bne.s   .ldropb
     tst.b   ol_building
-    bne.s   .ldrop
+    bne.s   .ldropl
     st      vbl_take
     ;; Image rendue par le GPU disponible : on l'affiche, avec sa liste
-    ;; d'objets préparée après le NMI ou une IRQ (PrebuildOL). Pas prête (NMI
-    ;; trop long) : elle attend la VBL suivante. La construire ici retardait
+    ;; d'objets préparée avant le NMI (PrebuildOL). Pas prête : elle attend la
+    ;; VBL suivante (HUD L). La construire ici retardait
     ;; RefreshOL d'environ 37 lignes : le haut de l'image était affiché avec
     ;; la liste de l'image précédente (déjà parcourue par l'OP), sans ses
     ;; sprites alors que le décor restait visible.
@@ -395,17 +403,30 @@ jag_vbl:
     tst.b   ol_next_ready
     bne.s   .lready
     sf      vbl_take
+    bra.s   .ldropl
+.ldropb:
+    .if ^^defined PERFHUD
+    addq.w  #1,perf_bdrop              ; image sautée : GPU pas fini (HUD B)
+    .endif
+    bra.s   .ldrop
+.ldropl:
+    addq.l  #1,stat_ldrop              ; image sautée : liste pas prête
+    .if ^^defined PERFHUD
+    addq.w  #1,perf_ldrop              ; (HUD L)
+    .endif
     bra.s   .ldrop
 .lready:
     sf      ol_next_ready
     clr.l   snap_pending
     st      vbl_swapped
+    addq.l  #1,stat_drawn              ; images affichées (mesures : JagMCP, MAME)
     .if ^^defined PERFHUD
     addq.w  #1,perf_drawn              ; image affichée
     .endif
     move.l  ol_wbuf,ol_master
     move.w  ol_wcount,ol_count
     st      ol_full
+    bsr     TrimSpriteLayers
     bra.s   .lafter
 .ldrop:
     clr.l   rlog_count
@@ -478,7 +499,8 @@ JagDebugColor:
 ;; real console »), mis à jour chaque seconde (60 / 50 VBL) :
 ;;   J = images de jeu (NMI terminés), A = images affichées (rendues par le
 ;;   GPU), R = % du temps où le 68000 attend (stop de hle_idle), G = % du
-;;   temps où le GPU dessine. Temps mesurés en demi-lignes (VC).
+;;   temps où le GPU dessine, B / L = images sautées faute de rendu GPU fini /
+;;   de liste d'objets prête. Temps mesurés en demi-lignes (VC).
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
     .if ^^defined PERFHUD
 ;; d0.w = VC de départ -> d0.l = demi-lignes écoulées depuis (moins d'une image)
@@ -549,6 +571,16 @@ PerfShow:
     bsr     .lpct
     bsr     .ldig2
     move.b  #15,(a0)+
+    move.b  #16,(a0)+                  ; B
+    move.w  perf_bdrop,d0
+    bsr     .ldig2
+    move.b  #15,(a0)+
+    move.b  #17,(a0)+                  ; L
+    move.w  perf_ldrop,d0
+    bsr     .ldig2
+    move.b  #15,(a0)+
+    clr.w   perf_bdrop
+    clr.w   perf_ldrop
     clr.w   perf_vbls
     clr.w   perf_nmi
     clr.w   perf_drawn
@@ -558,7 +590,7 @@ PerfShow:
     lea     perf_txt,a0
     lea     perf_bmp,a1
     lea     perf_font,a2
-    moveq   #15,d4
+    moveq   #(PERF_W/8)-1,d4
 .lch:
     moveq   #0,d0
     move.b  (a0)+,d0
@@ -1195,17 +1227,16 @@ BuildObjectList:
     bsr     WriteBranch
     movea.l ol_wbuf,a0
     lea     16(a0),a0
-    ;; Sprites derrière le décor
+    ;; Sprites derrière le décor (lignes occupées : TrimSpriteLayers)
+    clr.l   ol_wsprb
+    clr.l   ol_wsprf
     btst    #4,disp_regs+SR_MASK
     beq.s   .lnob
     move.l  disp_behind,d0
     beq.s   .lnob
-    move.w  #0,d1                      ; x dans l'image
-    move.w  #0,d2                      ; y
-    move.w  #NES_HEIGHT,d3             ; hauteur
-    move.w  #256,d4                    ; largeur
-    moveq   #0,d5                      ; premier pixel (FIRSTPIX)
-    bsr     WriteBitmap8
+    move.l  a0,ol_wsprb                ; ajusté à l'échange (TrimSpriteLayers)
+    moveq   #-1,d6
+    bsr     SpriteLayer
 .lnob:
     ;; Décor : une série d'objets par bande
     btst    #3,disp_regs+SR_MASK
@@ -1223,12 +1254,9 @@ BuildObjectList:
     beq.s   .lnof
     move.l  disp_front,d0
     beq.s   .lnof
-    move.w  #0,d1
-    move.w  #0,d2
-    move.w  #NES_HEIGHT,d3
-    move.w  #256,d4
-    moveq   #0,d5
-    bsr     WriteBitmap8
+    move.l  a0,ol_wsprf
+    moveq   #-1,d6
+    bsr     SpriteLayer
 .lnof:
     .if ^^defined NOEDGEMASK
     .else
@@ -1403,6 +1431,56 @@ BuildBandObjects:
     swap    d7
     move.w  bgo_screeny,d7
     bra     WriteBitmap8At
+
+;; Calque de sprites d0 -> objet de 16 octets en a0 : d6 = -1 toute la
+;; hauteur ; sinon lignes occupées relevées par le GPU (début << 16 | fin), et
+;; 0 = calque vide : bitmap placé sous la fin du balayage (jamais affiché).
+;; L'OP, prioritaire sur le 68000, ne relit plus 256 octets par ligne vide.
+SpriteLayer:
+    moveq   #0,d1                      ; x dans l'image
+    move.w  #256,d4                    ; largeur
+    moveq   #0,d5                      ; premier pixel (FIRSTPIX)
+    cmpi.l  #-1,d6
+    bne.s   .lext
+    moveq   #0,d2
+    move.w  #NES_HEIGHT,d3
+    bra.s   WriteBitmap8
+.lext:
+    move.l  d6,d2
+    beq.s   .lnone
+    swap    d2                         ; première ligne
+    move.w  d6,d3
+    sub.w   d2,d3                      ; hauteur
+    ble.s   .lnone
+    moveq   #0,d7
+    move.w  d2,d7                      ; même ligne à l'écran
+    bra.s   WriteBitmap8At
+.lnone:
+    ;; calque vide : bitmap d'une ligne à un YPOS jamais atteint (980 lignes plus
+    ;; bas : 1986 NTSC / 2042 PAL, < 2048) ; l'OP le saute et suit son lien
+    moveq   #0,d2
+    moveq   #1,d3
+    move.l  #980,d7
+    bra     WriteBitmap8At
+
+;; À l'échange d'image (le GPU a fini ce rendu) : calques de sprites de la
+;; liste qui entre limités aux lignes qu'ils occupent (gs_extb / gs_extf)
+TrimSpriteLayers:
+    move.l  ol_wsprb,d0
+    beq.s   .lf
+    movea.l d0,a0
+    move.l  disp_behind,d0
+    move.l  gs_extb,d6                 ; (RAM GPU : move.l)
+    bsr     SpriteLayer
+.lf:
+    move.l  ol_wsprf,d0
+    beq.s   .lr
+    movea.l d0,a0
+    move.l  disp_front,d0
+    move.l  gs_extf,d6
+    bsr     SpriteLayer
+.lr:
+    rts
 
 ;; Bitmap 8 bpp de l'image NES, plein écran (x/y écran = 0)
 WriteBitmap8:
@@ -1899,6 +1977,8 @@ perf_font:
     dc.b    $70,$88,$80,$B8,$88,$88,$78,$00                ; G
     dc.b    $C0,$C8,$10,$20,$40,$98,$18,$00                ; %
     dc.b    $00,$00,$00,$00,$00,$00,$00,$00                ;  
+    dc.b    $F0,$88,$88,$F0,$88,$88,$F0,$00                ; B
+    dc.b    $80,$80,$80,$80,$80,$80,$F8,$00                ; L
     .even
     .endif
 ;; Diagnostic des exceptions (hors BSS : conservé si le démarrage est rejoué)
@@ -1954,10 +2034,11 @@ DSPCodeEnd:
     .long                              ; (code RISC copié en longs : aligné avant et après)
 
 ;; Le code RISC doit tenir dans la RAM locale (DSP : marge pour la pile r31)
-    .if gpu_end > G_ENDRAM
+    .if gpu_end > $F04000                ; (littéraux : rmac peut mal évaluer un .if
+                                       ; comparé à un equ calculé, ici G_ENDRAM)
     .error "code GPU trop grand pour la RAM GPU (4 Ko)"
     .endif
-    .if dsp_end > (D_ENDRAM-256)
+    .if dsp_end > $F1CF00                ; D_ENDRAM - 256
     .error "code DSP trop grand pour la RAM DSP (8 Ko moins la pile)"
     .endif
 
@@ -1998,11 +2079,17 @@ ol_next_ready:  ds.b    1              ; liste de l'instantané en attente prêt
 vc_vbl:         ds.w    1              ; VC au début de la dernière VBL
 frame_hl:       ds.w    1              ; demi-lignes par image (525 NTSC, 625 PAL)
 vbl_take:       ds.b    1              ; VBL : instantané à prendre (GPU libre)
+    .even
+ol_wsprb:       ds.l    1              ; objets des calques de sprites dans la liste
+ol_wsprf:       ds.l    1              ; construite (0 = absent ; TrimSpriteLayers)
 vbl_swapped:    ds.b    1              ; image échangée à cette VBL
     .even
     .even
 stat_lag:       ds.l    1              ; VBL arrivées pendant le NMI (image NES en retard)
 stat_gpubusy:   ds.l    1              ; VBL arrivées pendant un rendu GPU (image sautée)
+stat_ldrop:     ds.l    1              ; VBL où la liste d'objets n'était pas prête (image sautée)
+stat_drawn:     ds.l    1              ; images affichées
+stat_nmi:       ds.l    1              ; images de jeu (NMI terminés)
 irq_nom16:      ds.w    1              ; ligne NES (1/16) de la prochaine IRQ (modèle du compteur VRC4)
 irq_cur16:      ds.w    1              ; ligne NES (1/16) de l'IRQ en cours
 irq_cur:        ds.w    1              ; ligne NES (entière) de l'IRQ en cours
@@ -2066,7 +2153,9 @@ idle_vc:        ds.w    1              ; VC au début de l'attente (hle_idle)
 gpu_start_vc:   ds.w    1              ; VC au départ du rendu
 idle_on:        ds.b    1
 gpu_on:         ds.b    1
-perf_txt:       ds.b    16             ; caractères affichés (index de perf_font)
+perf_bdrop:     ds.w    1              ; images sautées : GPU pas fini (B)
+perf_ldrop:     ds.w    1              ; images sautées : liste pas prête (L)
+perf_txt:       ds.b    24             ; caractères affichés (index de perf_font)
     .phrase
 perf_bmp:       ds.b    256*8          ; 128 x 8 pixels utiles (pas de 256 octets)
     .endif
