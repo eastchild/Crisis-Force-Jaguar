@@ -437,11 +437,119 @@ Audit du code par rapport au skill mis à jour (`D:\source_codes\atari-jaguar-ga
 - VJ : intro (`.j64`) et niveau 2 corrects, HUD perfhud et nodraw lisibles ;
 - `check_hw_rules` sans faute.
 
+## Quatorzième retour : ralentissements au niveau 2 (BigPEmu)
+
+- **MAME ne montre pas de régression** (niveau 2 : 29 à 34 images en retard sur 40 s, comme avant). MAME ne modélise pas la contention du bus. Sur console, le 68000 perd surtout du temps quand l'OP, le GPU ou le blitter passent avant lui. Les corrections visent donc le bus.
+- **Priorité du 68000 pendant le travail du jeu :**
+  - en interruption, le 68000 passe devant le GPU et le blitter tant qu'il n'a pas écrit INT2 ;
+  - `jag_int` écrivait INT2 dès le début, si bien que tout le NMI, les IRQ et la préparation de la liste tournaient à la priorité la plus basse ;
+  - INT2 n'est plus écrit qu'en sortie de l'interruption la plus externe (compteur `jag_depth`).
+- **Lectures de l'OP :**
+  - les deux calques de sprites (256 octets par ligne chacun) étaient affichés sur toute la hauteur, même vides ;
+  - le GPU relève maintenant les lignes occupées par chaque calque d'après ses rectangles (`gpu_spr_ext` → `gs_extf` / `gs_extb`), et la liste d'objets n'affiche que celles-là (`SpriteLayer`), ou rien si le calque est vide ;
+  - tant que le GPU n'a pas fini le rendu, le calque est affiché sur toute la hauteur.
+  - Niveau 2 sous MAME : le calque « derrière » est vide sur 100 % des images, le calque « devant » occupe 185 lignes sur 240 en moyenne, soit environ 40 % de lectures de l'OP en moins par image.
+- **`hle_sprites` :** le parcours des 58 cases d'objets saute 4 cases vides d'un coup (`tst.l`) ; 10,0 % → 9,7 % du temps du 68000.
+- **Vérifications :**
+  - `recomp_test` à 0 échec (normal, `--options`), états du boss inchangés (5 et 3, artefacts connus) ;
+  - MAME niveaux 1 à 7 sans erreur ni image sautée ;
+  - image composée par la liste d'objets (`jag_sim --gpu --ol`) et VJ corrects, y compris les sprites aux bords haut et bas ;
+  - `check_hw_rules` sans faute.
+- **À mesurer dans BigPEmu** avec `CrisisForce_perfhud.j64`, à l'endroit lent du niveau 2 :
+  - J < 60 et R proche de 0 : le 68000 est la limite ;
+  - A < J : c'est le GPU ;
+  - `CrisisForce_nodraw.j64` montre la vitesse du 68000 sans rendu.
+
+## Quinzième retour : J à 60 mais A entre 49 et 60 dans BigPEmu (niveau 2)
+
+Le jeu suit (J = 60) ; des images affichées sont sautées. Deux causes possibles :
+- **B** : le GPU n'a pas fini le rendu à la VBL ;
+- **L** : la liste d'objets n'est pas prête, parce que le NMI s'est terminé trop près de la VBL suivante.
+
+**Changements :**
+- **HUD perfhud :** deux compteurs de plus par seconde, B et L, soit « Jnn Ann Rnn Gnn Bnn Lnn ».
+- **Dessin des sprites (GPU) :**
+  - **chemin rapide :** pour un sprite devant le décor entièrement à l'écran (0 ≤ x ≤ 248), les 8 pixels d'une rangée sont convertis par les tables du décor en RAM GPU, avec +16 sur les pixels non nuls via le masque `gpu_smask`, puis fusionnés au calque en 2 ou 3 longs (lecture, masque, écriture), au lieu de 8 `storeb` et d'environ 110 instructions ;
+  - **recherche de bande :** elle repart de la bande de la rangée précédente.
+  - **Vérification :** rendu identique au bit près (582 rendus aux niveaux 1 et 5, `gpu_regress --cmp` compare maintenant les suites sans les numéros d'image).
+  - **Coût estimé au niveau 2 :** environ 76 000 cycles GPU par image (17 %).
+- **Découpage des calques à l'échange d'image (`TrimSpriteLayers`) :**
+  - la liste est construite avec des calques pleine hauteur ; à l'échange, le GPU a fini et les objets des calques sont ramenés aux lignes occupées ;
+  - un calque vide devient un bitmap d'une ligne à un YPOS jamais atteint.
+  - **Écueil :** deux branches « jamais prises » (CC 0, YPOS $7FF) donnaient un écran noir dans MAME et VJ, qui les prenaient.
+- **Construire la liste avant le NMI :** essayé puis abandonné. Le NMI démarre environ 0,6 ms plus tard, et MAME passe de 30 à 71 images en retard au niveau 2 : les sauts d'affichage seraient devenus des ralentissements du jeu.
+- **`--noint2prio` :** INT2 écrit dès l'entrée de l'interruption (comportement d'avant). Cartouche `dist/CrisisForce_perfhud_noint2prio.j64`, pour comparer dans BigPEmu.
+- **Vérifications :**
+  - MAME niveaux 1 à 7 sans erreur, retard comme avant (17 à 36 sur 40 s), captures non vides ;
+  - VJ : jeu et HUD corrects ;
+  - `check_hw_rules` sans faute.
+
+**À relever dans BigPEmu** (endroit lent du niveau 2), avec `CrisisForce_perfhud.j64` puis `CrisisForce_perfhud_noint2prio.j64` : les six valeurs J, A, R, G, B, L.
+
+## Seizième retour : skill du 2026-10-17, mesures dans JagMCP
+
+JagMCP (cœur FPGA MiSTer porté en C++, fidèle au cycle : contention du bus, attentes de la DRAM et des RISC) est piloté par `tools/jagmcp_run.py`. L'outil démarre la cartouche par le BIOS, la fait tourner par tranches d'images et lit les compteurs du programme (`stat_nmi`, `stat_drawn`, `stat_lag`, `stat_gpubusy`, `stat_ldrop`, VBL). Avec `--profile=N` et `--gpuprofile=N`, il fait un profil par échantillonnage (`debug.trace`, cycle de début de chaque instruction).
+
+**Niveau 2, partie chargée (pour 300 VBL), J = images de jeu, A = images affichées :**
+
+| Version | J | A | B (GPU pas fini) | L (liste pas prête) |
+|---|---|---|---|---|
+| INT2 en fin d'interruption, liste après le NMI | 300 | 85 à 103 | ≈ 200 | 0 |
+| INT2 tout de suite, liste après le NMI | 300 | ≈ 156 | 0 | ≈ 140 |
+| INT2 tout de suite, liste avant le NMI | 300 | 300 | 0 | 0 |
+
+**Conclusions :**
+- **Garder la priorité du bus pendant le NMI** (qui dure presque une image au niveau 2 sur console) affamait le GPU. INT2 est de nouveau écrit dès l'acquittement, comme le veut le skill.
+- **Construire la liste après le NMI** la rendait trop tardive une fois sur deux. Elle est maintenant construite avant le NMI. MAME montrait plus de « retard » dans ce cas, mais son compteur (`stat_lag`) compte les VBL tombées pendant un NMI, pas les images de jeu perdues : JagMCP montre que J reste à 60.
+- **Le 68000 sur console** (profil JagMCP) : environ 43 % dans le code recompilé, 18 % en attente (`stop`), 10 % dans `hle_sprites`.
+
+**Autres points du skill :**
+- **Contrôle de taille RISC :** il compare maintenant à des littéraux (`$F04000`, `$F1CF00`), et non à `G_ENDRAM` ou `D_ENDRAM`, que rmac peut mal évaluer dans un `.if`.
+- **Compteurs cumulés** dans toutes les versions, pour les mesures : `stat_drawn`, `stat_ldrop`, `stat_nmi`.
+- **Options retirées :** `--noint2prio`, `--earlyol` et la cartouche `perfhud_noint2prio` (expériences conclues).
+- **Non-régression MAME** (`tools/mame_stages.py`, 3000 images par niveau, BIOS compris) : les niveaux 1 à 7 n'ont ni erreur du runtime ni exception, ont 2351 ou 2352 images de jeu pour 2370 VBL, et 18 captures sur 18 non unies. Le `stat_lag` de MAME (16 à 70) n'est pas une mesure de vitesse ; la référence est JagMCP.
+
+## Dix-septième retour : images sautées au niveau 5 (eau animée)
+
+La Famicom affiche ce niveau sans perte : son PPU construit chaque pixel au balayage, et changer une banque CHR ne coûte qu'une écriture de registre. Ici, le GPU imite le PPU en dessinant le décor dans un bitmap. Il ne redessine que ce qui change (signatures de rangée, cache des tuiles converties). Mais toutes les 9 à 13 images, l'eau change une banque CHR, et toutes les tuiles visibles changent alors réellement : 992 tuiles (31 rangées × 32) sont recopiées dans le plan en une image.
+
+**Mesures (`risc_cycles`, image lourde) :** environ 222 000 cycles GPU, contre 12 000 à 37 000 pour une image ordinaire. La copie des tuiles du cache vers le plan (`gpu_bg_copy`, 8 `loadp`/`storep` par tuile, chaque `storep` attend son `loadp`) en prend 48 %, et la boucle des tuiles 32 %.
+
+**Piste 1, abandonnée : signature limitée aux banques utilisées par la rangée.** Si les tuiles et les attributs n'ont pas changé, on ne redessine la rangée que si l'une de ses tuiles est dans une banque changée (banque = tuile >> 6).
+- **Analyse :** à l'endroit mesuré, toutes les rangées visibles contiennent de l'eau de la banque animée. Aucune rangée n'est épargnée, et le test coûte environ 300 cycles par rangée (222 000 → 233 000).
+- **JagMCP :** 12 à 14 images sautées pour 300, contre 10 à 12 avant. Code retiré.
+
+**Piste 2, retenue : copie des tuiles au blitter** (skill : « Clears and copies go to the Blitter… start a blit, compute on the GPU, wait for IDLE before the next one »).
+- **`gpu_bg_blit` :** une tuile déjà convertie (présente dans `bg_tdata`) est copiée dans le plan par le blitter : rectangle de 8 × 8 pixels en mode phrase, A1 = plan (8 bpp, largeur 256), A2 = tuile (largeur 8), pas (-8, +1), commande `SRCEN|UPDA1|UPDA2|LFU_REPLACE`. Le GPU calcule la clé de la tuile suivante pendant la copie et attend le repos du blitter (bit 0 de B_CMD) avant d'en lancer une autre.
+- **Registres constants** (A1/A2_FLAGS, A1/A2_STEP, A1_CLIP = 0) posés au début du décor (`gpu_bg`). Avant chaque copie : A1_BASE, A1_PIXEL, A1_FPIXEL, A2_BASE, A2_PIXEL, B_COUNT, puis B_CMD en dernier.
+- **Ordre des accès :**
+  - avant une conversion, le GPU attend le blitter, qui peut encore lire la même entrée du cache ;
+  - en fin de rendu, il attend la dernière copie avant de remettre `gpu_busy` à 0.
+- **Les tuiles converties dans l'image** restent copiées par le GPU (`gpu_bg_copy`).
+- **`tools/jrisc.py` :** émule ce sous-ensemble du blitter (copie de rectangle en 8 bpp, immédiate, B_CMD lu au repos), pour `jag_sim --gpu` et `gpu_regress`.
+- **Estimation GPU (`risc_cycles`, image lourde) :** 222 000 → 140 000 cycles. Le temps du blitter n'est pas compté ; il travaille en parallèle.
+
+**Résultats (JagMCP, partie en eau du niveau 5, pour 300 VBL) :**
+
+| Version | J | A | B (GPU pas fini) |
+|---|---|---|---|
+| Copie par le GPU | 298 à 300 | 287 à 291 | 10 à 12 |
+| Signature limitée aux banques utilisées | 299 à 301 | 286 à 289 | 12 à 14 |
+| Copie au blitter | 299 à 301 | 299 à 301 | 0 |
+
+**Vérifications :**
+- **Rendu identique au bit près** (`gpu_regress`) :
+  - niveau 5 : 583 rendus contre l'ancien code (copie par le GPU, `--norowsig`) ;
+  - niveau 1 : 583 rendus contre `--norowsig`.
+- **MAME, niveaux 1 à 7 :** sans erreur, 18 captures sur 18 non unies ; capture du niveau 5 (eau) correcte.
+- **JagMCP :** capture du niveau 5 correcte ; niveaux 2 et 7 (2400 images) à 60 images de jeu et 60 affichées par seconde, B = 0 et L = 0 en partie.
+- **`check_hw_rules` :** sans faute. RAM GPU : `gpu_end` = $F03EF0 (272 octets libres).
+
 ## Reste à faire
 
-1. **BigPEmu : à retester à la main** avec les builds de `dist/`. Il ne peut pas être piloté ni capturé depuis un script : image noire même pour la cartouche témoin, pause sans le focus, touche de capture sans effet. `CrisisForce_perfhud.j64` montre les images en retard (fond rouge) et sautées (orange).
+1. **BigPEmu : confirmé le 2026-10-18** par l'utilisateur avec `CrisisForce_perfhud.j64` : J et A restent à 60 au niveau 2, comme JagMCP le prévoyait. BigPEmu ne peut être ni piloté ni capturé depuis un script : les essais suivants se font toujours à la main.
 2. **Matériel réel** (cartouche flash ou Skunkboard).
 3. **Mode 2 joueurs** avec deux manettes.
 4. **Retard restant** (≈ 1 % des images) : pointes de travail du jeu lui-même ; pistes : `hle_sprites` (≈ 10 %), code recompilé.
 
-*Document mis à jour : 2026-10-08*
+*Document mis à jour : 2026-10-17*

@@ -37,13 +37,16 @@ def run(frames, out):
 
 
 def compare(a, b):
-    la = open(a).read().split('\n')
-    lb = open(b).read().split('\n')
-    diff = [(x, y) for x, y in zip(la, lb) if x != y]
-    print(f'{len(la) - 1} / {len(lb) - 1} rendus, {len(diff)} différence(s)')
-    for x, y in diff[:5]:
-        print('  ', x, '|', y)
-    return 1 if diff or len(la) != len(lb) else 0
+    """Suites d'empreintes comparées sans les numéros d'image (un changement de
+    minutage peut avancer ou retarder un rendu d'une image dans la simulation)"""
+    ha = [l.split()[1] for l in open(a) if l.strip()]
+    hb = [l.split()[1] for l in open(b) if l.strip()]
+    n = min(len(ha), len(hb))
+    diff = [i for i in range(n) if ha[i] != hb[i]]
+    print(f'{len(ha)} / {len(hb)} rendus, {len(diff)} différence(s) sur les {n} premiers')
+    for i in diff[:5]:
+        print(f'   rendu {i} : {ha[i]} | {hb[i]}')
+    return 1 if diff else 0
 
 
 if __name__ == '__main__':

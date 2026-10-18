@@ -12,6 +12,12 @@ Registres : 2 bancs ; le banc 0 est imposé pendant une interruption (IMASK).
 
 MASK = 0xFFFFFFFF
 
+# Blitter (registres de Tom, écrits par le GPU)
+A1_BASE = 0xF02200
+B_CMD = 0xF02238
+SRCEN, UPDA1, UPDA2 = 0x1, 0x200, 0x400
+LFU_MASK, LFU_REPLACE = 0x01E00000, 0x01800000
+
 
 def s32(v):
     v &= MASK
@@ -243,7 +249,45 @@ class JRisc:
             return self.flags_value()
         if size == 4 and addr == self.flags_addr + 0x18:
             return self.hidata
+        if size == 4 and addr == B_CMD and self.flags_addr == 0xF02100:
+            return 1                                    # blitter au repos (copie immédiate)
         return self.mem.r32(addr) if size == 4 else self.mem.r16(addr) if size == 2 else self.mem.r8(addr)
+
+    def blit(self, cmd):
+        """Blitter, sous-ensemble utilisé par gpu.s : copie de rectangle
+        (SRCEN, LFU source), A1 = destination, A2 = source, 8 bpp, pointeurs
+        (x, y) et largeur des fenêtres (A*_FLAGS), pas en fin de ligne
+        (UPDA1 / UPDA2) ; copie immédiate (le GPU attend le repos de toute façon)"""
+        r = self.mem.r32
+        if cmd & ~(SRCEN | UPDA1 | UPDA2 | LFU_MASK) or cmd & LFU_MASK != LFU_REPLACE or not cmd & SRCEN:
+            raise NotImplementedError(f'B_CMD ${cmd:08X}')
+
+        def width(flags):
+            if (flags >> 3) & 7 != 3:
+                raise NotImplementedError(f'A*_FLAGS ${flags:08X} : 8 bpp seulement')
+            f = (flags >> 9) & 63
+            return ((4 | (f & 3)) << (f >> 2)) >> 2
+
+        def xy(v):
+            return s32(v << 16) >> 16, s32(v) >> 16
+
+        b1, w1 = r(A1_BASE), width(r(A1_BASE + 4))
+        b2, w2 = r(A1_BASE + 0x24), width(r(A1_BASE + 0x28))
+        x1, y1 = xy(r(A1_BASE + 0x0C))
+        x2, y2 = xy(r(A1_BASE + 0x30))
+        sx1, sy1 = xy(r(A1_BASE + 0x10))
+        sx2, sy2 = xy(r(A1_BASE + 0x34))
+        cnt = r(A1_BASE + 0x3C)
+        inner, outer = cnt & 0xFFFF or 0x10000, cnt >> 16 or 0x10000
+        for _ in range(outer):
+            for i in range(inner):
+                self.mem.w8(b1 + y1 * w1 + x1 + i, self.mem.r8(b2 + y2 * w2 + x2 + i))
+            x1 += inner
+            x2 += inner
+            if cmd & UPDA1:
+                x1, y1 = x1 + sx1, y1 + sy1
+            if cmd & UPDA2:
+                x2, y2 = x2 + sx2, y2 + sy2
 
     def store(self, addr, val, size):
         addr &= 0xFFFFFF
@@ -252,6 +296,9 @@ class JRisc:
             return
         if size == 4 and addr == self.flags_addr + 0x18:
             self.hidata = val & MASK
+            return
+        if size == 4 and addr == B_CMD and self.flags_addr == 0xF02100:
+            self.blit(val & MASK)
             return
         if size == 4:
             self.mem.w32(addr, val & MASK)
